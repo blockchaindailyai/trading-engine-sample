@@ -282,6 +282,7 @@ class BacktestEngine:
             holding_bars: int,
             exit_signal: str,
             exit_index: int,
+            bound_exit_bar_adverse_to_fill: bool = False,
             signal_intent_flat_time_value: pd.Timestamp | None = None,
         ) -> None:
             nonlocal capital
@@ -328,6 +329,27 @@ class BacktestEngine:
                 trade_slice = data.iloc[entry_index : exit_index + 1]
                 trade_high = float(pd.to_numeric(trade_slice.get("high"), errors="coerce").max())
                 trade_low = float(pd.to_numeric(trade_slice.get("low"), errors="coerce").min())
+                if bound_exit_bar_adverse_to_fill:
+                    # First-touch risk exits close at `exit_fill`. Any more adverse
+                    # movement in the exit bar occurs after the position is closed.
+                    pre_exit_slice = data.iloc[entry_index:exit_index]
+                    exit_bar = data.iloc[exit_index]
+                    if position == 1:
+                        bounded_exit_low = max(float(exit_bar["low"]), exit_fill)
+                        pre_exit_low = pd.to_numeric(pre_exit_slice.get("low"), errors="coerce").min()
+                        trade_low = (
+                            min(float(pre_exit_low), bounded_exit_low)
+                            if pd.notna(pre_exit_low)
+                            else bounded_exit_low
+                        )
+                    else:
+                        bounded_exit_high = min(float(exit_bar["high"]), exit_fill)
+                        pre_exit_high = pd.to_numeric(pre_exit_slice.get("high"), errors="coerce").max()
+                        trade_high = (
+                            max(float(pre_exit_high), bounded_exit_high)
+                            if pd.notna(pre_exit_high)
+                            else bounded_exit_high
+                        )
                 if position == 1:
                     peak_unrealized_return_pct = (trade_high - entry_price) / entry_price
                     worst_unrealized_return_pct = (trade_low - entry_price) / entry_price
@@ -760,6 +782,7 @@ class BacktestEngine:
                             holding_bars=i - entry_index if entry_index is not None else 0,
                             exit_signal=self._finalize_exit_signal_label(self._engine_event_exit_reason(selected_event), open_entry_signal),
                             exit_index=i,
+                            bound_exit_bar_adverse_to_fill=True,
                         )
                         if selected_event == "liquidation":
                             capital = max(capital, 0.0)
@@ -847,6 +870,7 @@ class BacktestEngine:
                         holding_bars=i - entry_index if entry_index is not None else 0,
                         exit_signal=resolved_stop_exit_label,
                         exit_index=i,
+                        bound_exit_bar_adverse_to_fill=True,
                     )
                     execution_events.append(
                         ExecutionEvent(
@@ -953,6 +977,7 @@ class BacktestEngine:
                             holding_bars=i - entry_index if entry_index is not None else 0,
                             exit_signal=resolved_exit_label,
                             exit_index=i,
+                            bound_exit_bar_adverse_to_fill="stop" in resolved_exit_label.lower(),
                         )
                         execution_events.append(
                             ExecutionEvent(
@@ -1234,13 +1259,18 @@ class BacktestEngine:
                     exit_fill = self._resolve_signal_fill(bar=bar, prev_close=prev_close, side=-position, signal_fill=signal_fill)
                     if exit_fill is not None:
                         closing_units = units
+                        resolved_signal_exit_label = self._finalize_exit_signal_label(
+                            exit_signal_label,
+                            open_entry_signal,
+                        )
                         record_closed_trade(
                             close_units=closing_units,
                             exit_time=ts,
                             exit_fill=exit_fill,
                             holding_bars=i - entry_index if entry_index is not None else 0,
-                            exit_signal=self._finalize_exit_signal_label(exit_signal_label, open_entry_signal),
+                            exit_signal=resolved_signal_exit_label,
                             exit_index=i,
+                            bound_exit_bar_adverse_to_fill="stop" in resolved_signal_exit_label.lower(),
                             signal_intent_flat_time_value=signal_intent_flat_time,
                         )
                         execution_events.append(
@@ -1250,7 +1280,7 @@ class BacktestEngine:
                                 side="sell" if position == 1 else "buy",
                                 price=exit_fill,
                                 units=closing_units,
-                                strategy_reason=self._finalize_exit_signal_label(exit_signal_label, open_entry_signal),
+                                strategy_reason=resolved_signal_exit_label,
                             )
                         )
                         position = 0
@@ -1361,13 +1391,18 @@ class BacktestEngine:
                         )
                     else:
                         reduce_units = min(units, -delta_units)
+                        resolved_reduce_exit_label = self._finalize_exit_signal_label(
+                            exit_signal_label,
+                            open_entry_signal,
+                        )
                         record_closed_trade(
                             close_units=reduce_units,
                             exit_time=ts,
                             exit_fill=rebalance_fill,
                             holding_bars=i - entry_index if entry_index is not None else 0,
-                            exit_signal=self._finalize_exit_signal_label(exit_signal_label, open_entry_signal),
+                            exit_signal=resolved_reduce_exit_label,
                             exit_index=i,
+                            bound_exit_bar_adverse_to_fill="stop" in resolved_reduce_exit_label.lower(),
                             signal_intent_flat_time_value=signal_intent_flat_time,
                         )
                         self._ensure_finite(capital, f"capital became non-finite after reduce/rebalance at bar index {i}")
